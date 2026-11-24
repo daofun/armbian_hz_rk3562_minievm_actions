@@ -1,0 +1,314 @@
+name: Armbian Debian 13 Minimal - HZ-RK3562 MiniEVM (Rockchip 6.1)
+
+# 三个 Job：
+#   1. uboot     —— 用厂家 SDK 的 u-boot/make.sh + rkbin 编译 U-Boot（idblock.bin / uboot.img / loader）
+#   2. dts-patch —— 取 Armbian 维护的 Rockchip BSP 内核(armbian/linux-rockchip)的设备树目录，
+#                   放入本仓库 dts/ 下的板级设备树，先编译检查，再生成 Armbian 内核补丁
+#   3. armbian   —— Armbian rk35xx 平台 vendor 分支（Rockchip 6.1）编译内核 + Debian 13 trixie Minimal 镜像，
+#                   并把厂家 U-Boot 写入镜像
+
+on:
+  workflow_dispatch:
+    inputs:
+      armbian_ref:
+        description: "armbian/build 分支或 tag（跑通后建议固定为某个 tag）"
+        default: "main"
+        required: true
+      kernel_branch:
+        description: "vendor = Rockchip 6.1（推荐）；vendor-next = Rockchip 6.12（实验性）"
+        type: choice
+        options: [vendor, vendor-next]
+        default: vendor
+      dtb_name:
+        description: "启动用设备树名（不带 .dtb，需在 dts/ 目录中有同名 .dts）"
+        default: "hzhy_rk3562_mini"
+      uboot_repo:
+        description: "U-Boot 仓库 owner/name（根目录含 u-boot/ 和 rkbin/）。留空 = <你的用户名>/rk3562-uboot"
+        default: ""
+      uboot_branch:
+        description: "U-Boot 仓库分支"
+        default: "main"
+      uboot_args:
+        description: "传给 u-boot/make.sh 的参数"
+        default: "hzhy_rk3562_mini"
+      publish_release:
+        description: "编译完成后发布到 GitHub Release"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+env:
+  BOARD: hz-rk3562-minievm
+  UBOOT_REPO: ${{ inputs.uboot_repo != '' && inputs.uboot_repo || format('{0}/rk3562-uboot', github.repository_owner) }}
+  TC_URL: https://developer.arm.com/-/media/Files/downloads/gnu-a/10.3-2021.07/binrel
+
+jobs:
+  # ---------------------------------------------------------------------------
+  uboot:
+    name: Vendor U-Boot
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout u-boot + rkbin
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.UBOOT_REPO }}
+          ref: ${{ inputs.uboot_branch }}
+          token: ${{ secrets.BSP_TOKEN || github.token }}
+          path: sdk
+          fetch-depth: 1
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential bc bison flex libssl-dev \
+            device-tree-compiler python3 python3-pyelftools python-is-python3 xz-utils wget
+
+      - name: Install SDK toolchain (gcc-arm-10.3-2021.07，与 SDK prebuilts 相同)
+        run: |
+          set -euo pipefail
+          for t in aarch64:gcc-arm-10.3-2021.07-x86_64-aarch64-none-linux-gnu \
+                   arm:gcc-arm-10.3-2021.07-x86_64-arm-none-linux-gnueabihf; do
+            dir=${t%%:*}; name=${t#*:}
+            mkdir -p sdk/prebuilts/gcc/linux-x86/${dir}
+            wget -q "${TC_URL}/${name}.tar.xz"
+            tar -xf "${name}.tar.xz" -C sdk/prebuilts/gcc/linux-x86/${dir}
+            rm -f "${name}.tar.xz"
+          done
+
+      - name: Build U-Boot (make.sh)
+        working-directory: sdk/u-boot
+        env:
+          UBOOT_ARGS: ${{ inputs.uboot_args }}
+        run: |
+          set -euo pipefail
+          # 从 Windows 推送时可执行位会丢，统一补上
+          find . ../rkbin -type f \( -name '*.sh' -o -name '*.py' \) -exec chmod +x {} +
+          chmod -R +x ../rkbin/tools || true
+          chmod +x make.sh
+
+          ./make.sh ${UBOOT_ARGS}
+
+          # idblock.bin（写到 sector 64）：优先 make.sh 产物，其次 --idblock，最后按 ini 手工打包
+          if [ ! -f idblock.bin ]; then ./make.sh --idblock || true; fi
+          if [ ! -f idblock.bin ]; then
+            INI=$(printf '%s\n' ${UBOOT_ARGS} | grep -E '\.ini$' | head -n1 || true)
+            INI=${INI:-../rkbin/RKBOOT/RK3562MINIALL.ini}
+            DDR=$(grep -E '^FlashData=' "$INI" | cut -d= -f2 | tr -d '\r')
+            SPL=$(grep -E '^FlashBoot=' "$INI" | cut -d= -f2 | tr -d '\r')
+            echo "Fallback idblock: DDR=$DDR SPL=$SPL"
+            ./tools/mkimage -n rk3562 -T rksd -d "../rkbin/${DDR}:../rkbin/${SPL}" idblock.bin
+          fi
+
+          mkdir -p "$GITHUB_WORKSPACE/out"
+          cp -v uboot.img idblock.bin "$GITHUB_WORKSPACE/out/"
+          cp -v *loader*.bin "$GITHUB_WORKSPACE/out/" 2>/dev/null || true
+          ls -la "$GITHUB_WORKSPACE/out"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: uboot-blobs
+          path: out/*
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  dts-patch:
+    name: Board DTS -> kernel patch
+    runs-on: ubuntu-24.04
+    outputs:
+      kpatchdir: ${{ steps.kinfo.outputs.kpatchdir }}
+      kbranch: ${{ steps.kinfo.outputs.kbranch }}
+    steps:
+      - name: Checkout this repo
+        uses: actions/checkout@v4
+        with:
+          path: hz
+
+      - name: Resolve Armbian vendor kernel branch
+        id: kinfo
+        env:
+          ARMBIAN_REF: ${{ inputs.armbian_ref }}
+          KBRANCH: ${{ inputs.kernel_branch }}
+        run: |
+          set -euo pipefail
+          git clone -q --depth=1 --branch "${ARMBIAN_REF}" https://github.com/armbian/build.git armbian
+          BRANCH="${KBRANCH}" bash -c '
+            set -e
+            exit_with_error() { echo "ERROR: $*" >&2; exit 1; }
+            source armbian/config/sources/families/include/rockchip_vendor_common.inc
+            rockchip_vendor_kernel_config
+            echo "kbranch=${KERNELBRANCH#branch:}"
+            echo "kmm=${KERNEL_MAJOR_MINOR}"
+            echo "kpatchdir=${KERNELPATCHDIR}"
+          ' | tee -a "$GITHUB_OUTPUT"
+
+      - name: Sparse checkout armbian/linux-rockchip (dts + dt-bindings only)
+        env:
+          KB: ${{ steps.kinfo.outputs.kbranch }}
+        run: |
+          set -euo pipefail
+          git clone -q --depth=1 --filter=blob:none --sparse --branch "${KB}" \
+            https://github.com/armbian/linux-rockchip.git linux
+          cd linux
+          git sparse-checkout set arch/arm64/boot/dts/rockchip include/dt-bindings include/uapi/linux
+          ls arch/arm64/boot/dts/rockchip/rk3562*.dtsi
+
+      - name: Add board DTS, compile check, generate patch
+        working-directory: linux
+        env:
+          DTB_NAME: ${{ inputs.dtb_name }}
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq && sudo apt-get install -y -qq device-tree-compiler cpp
+
+          SRC="$GITHUB_WORKSPACE/hz/dts"
+          DST=arch/arm64/boot/dts/rockchip
+          shopt -s nullglob
+          files=("$SRC"/*.dts "$SRC"/*.dtsi)
+          [ ${#files[@]} -gt 0 ] || { echo "::error::仓库 dts/ 目录为空，请放入板级设备树（如 hzhy_rk3562_mini.dts/.dtsi、HZ-MiniEVM_EXP.dtsi）"; exit 1; }
+          [ -f "$SRC/${DTB_NAME}.dts" ] || { echo "::error::dts/ 中没有 ${DTB_NAME}.dts"; exit 1; }
+
+          for f in "${files[@]}"; do
+            b=$(basename "$f")
+            if [ -e "$DST/$b" ]; then
+              echo "::error::dts/$b 与内核自带文件同名。不要复制 SoC 级文件（rk3562.dtsi、rk3562-linux.dtsi 等），只放板级文件"; exit 1
+            fi
+            sed 's/\r$//' "$f" > "$DST/$b"     # 去掉 Windows 换行
+          done
+
+          # 编译检查所有 .dts
+          mkdir -p "$GITHUB_WORKSPACE/dtb-check"
+          for f in "$SRC"/*.dts; do
+            n=$(basename "$f" .dts)
+            echo "::group::dtc $n"
+            cpp -nostdinc -undef -D__DTS__ -x assembler-with-cpp \
+              -I "$DST" -I arch/arm64/boot/dts -I include \
+              -o "/tmp/$n.pp" "$DST/$n.dts"
+            dtc -q -I dts -O dtb -@ -o "$GITHUB_WORKSPACE/dtb-check/$n.dtb" "/tmp/$n.pp"
+            echo "OK: $n.dtb"
+            echo "::endgroup::"
+            grep -qE "[[:space:]]${n}\.dtb\b" "$DST/Makefile" || echo "dtb-\$(CONFIG_ARCH_ROCKCHIP) += ${n}.dtb" >> "$DST/Makefile"
+          done
+
+          git config user.name  "hz-rk3562-ci"
+          git config user.email "ci@localhost"
+          git add -A "$DST"
+          git commit -q -m "arm64: dts: rockchip: add HZ-RK3562 MiniEVM board device trees"
+          mkdir -p "$GITHUB_WORKSPACE/kpatch"
+          git format-patch -1 --stdout > "$GITHUB_WORKSPACE/kpatch/0900-hz-rk3562-minievm-dts.patch"
+          git show --stat HEAD
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kernel-dts-patch
+          path: kpatch/*.patch
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dtb-check
+          path: dtb-check/*.dtb
+
+  # ---------------------------------------------------------------------------
+  armbian:
+    name: Armbian trixie minimal image
+    needs: [uboot, dts-patch]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+
+      - name: Checkout this repo
+        uses: actions/checkout@v4
+        with:
+          path: hz
+
+      - name: Clone Armbian build framework
+        env:
+          ARMBIAN_REF: ${{ inputs.armbian_ref }}
+        run: |
+          git clone --depth=1 --branch "${ARMBIAN_REF}" https://github.com/armbian/build.git armbian
+          mkdir -p armbian/userpatches
+          cp -a hz/userpatches/. armbian/userpatches/
+
+      - name: Download U-Boot blobs
+        uses: actions/download-artifact@v4
+        with:
+          name: uboot-blobs
+          path: armbian/userpatches/hz-blobs
+
+      - name: Download kernel DTS patch
+        uses: actions/download-artifact@v4
+        with:
+          name: kernel-dts-patch
+          path: armbian/userpatches/kernel/${{ needs.dts-patch.outputs.kpatchdir }}
+
+      - name: Write Armbian config
+        env:
+          KBRANCH: ${{ inputs.kernel_branch }}
+          DTB_NAME: ${{ inputs.dtb_name }}
+        run: |
+          set -euo pipefail
+          cat > armbian/userpatches/config-hz.conf <<EOF
+          BOARD="${BOARD}"
+          BRANCH="${KBRANCH}"
+          RELEASE="trixie"
+          BUILD_MINIMAL="yes"
+          BUILD_DESKTOP="no"
+          KERNEL_CONFIGURE="no"
+          KERNEL_GIT="shallow"
+          COMPRESS_OUTPUTIMAGE="sha,xz"
+          EXPERT="yes"
+          SHARE_LOG="no"
+          HZ_FDT="rockchip/${DTB_NAME}.dtb"
+          EOF
+          cat armbian/userpatches/config-hz.conf
+          find armbian/userpatches -type f | sort
+
+      - name: Build
+        working-directory: armbian
+        run: ./compile.sh build hz
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: armbian-logs
+          path: armbian/output/logs/
+          if-no-files-found: ignore
+
+      - name: Collect image
+        run: |
+          mkdir -p dist
+          cp -v armbian/output/images/*.img.xz* dist/ 2>/dev/null || cp -v armbian/output/images/* dist/
+          cp -v armbian/userpatches/hz-blobs/* dist/
+          ls -la dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Armbian-HZ-RK3562-MiniEVM-trixie-minimal-${{ inputs.kernel_branch }}
+          path: dist/*
+          compression-level: 0
+
+      - name: Publish release
+        if: ${{ inputs.publish_release }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: hz-rk3562-trixie-${{ inputs.kernel_branch }}-${{ github.run_number }}
+          name: Armbian Debian 13 Minimal for HZ-RK3562 MiniEVM (${{ inputs.kernel_branch }}, #${{ github.run_number }})
+          body: |
+            - Board: HZ-RK3562 MiniEVM（${{ inputs.dtb_name }}）
+            - Debian 13 (trixie) minimal
+            - Kernel: Armbian rk35xx ${{ inputs.kernel_branch }}（armbian/linux-rockchip ${{ needs.dts-patch.outputs.kbranch }}）
+            - U-Boot: 厂家 SDK
+            - `*_loader_*.bin` 用于 RKDevTool / rkdeveloptool 下载模式烧录
+          files: dist/*
