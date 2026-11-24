@@ -1,0 +1,56 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/*
+ * Copyright (c) 2025 HZHY Electronics Co., Ltd.
+ */
+
+/ {
+    vcc_4g_reset: vcc-4g-reset-regulator {
+		compatible = "regulator-fixed";
+		gpio = <&gpio0 RK_PC4 GPIO_ACTIVE_LOW>;
+		regulator-name = "vcc_4g_reset";
+		regulator-always-on;
+		regulator-boot-on;
+		enable-active-low;
+	};
+
+    /* run led */
+    leds: leds {
+		compatible = "gpio-leds";
+        run_led: run-led {
+            gpios = <&gpio3 RK_PD1 GPIO_ACTIVE_HIGH>;
+            linux,default-trigger = "heartbeat";
+        };
+    };
+};
+
+/* RS485 J30 Pin8-UART6_TX_M0 Pin10-UART6_RX_M0 */
+&uart6 {
+    status = "okay";
+    pinctrl-names = "default";
+    pinctrl-0 = <&uart6m0_xfer>;
+};
+
+/* RS485 J30 Pin33-UART7_TX_M0 Pin37-UART7_RX_M0 */
+&uart7 {
+    status = "okay";
+    pinctrl-names = "default";
+    pinctrl-0 = <&uart7m0_xfer>;
+};
+
+/* BD J30 Pin31-UART5_TX_M1 Pin35-UART2_RX_M2 */
+&uart5 {
+    status = "okay";
+    pinctrl-names = "default";
+    pinctrl-0 = <&uart5m1_xfer>;
+};
+
+/* RTC J17 Pin3-I2C3_SDA_M2 Pin5-I2C3_SCL_M2 */
+&i2c2{
+    status = "okay";
+    pcf8563: pcf8563@51 {
+		compatible = "nxp,pcf8563";
+		reg = <0x51>;
+		#clock-cells = <0>;
+		status = "okay";
+	};
+};
