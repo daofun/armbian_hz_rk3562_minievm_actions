@@ -7,16 +7,34 @@ set -euo pipefail
 
 SDK=$(realpath "$1")
 OWNER=$2
-OUT=$(realpath -m "${3:-$PWD/hz-bsp-repos}")
+OUT=$(realpath -m "${3:-$HOME/hz-bsp-repos}")
 REPO_ROOT=$(cd "$(dirname "$0")/.." && pwd)
 mkdir -p "$OUT"
 
 case "$SDK" in /mnt/*) echo "警告: SDK 位于 Windows 盘（$SDK），可执行位/符号链接可能已损坏，建议在 ~/ 下重新解压" ;; esac
 
+command -v git > /dev/null || { echo "错误: 没有 git，请先运行: sudo apt update && sudo apt install -y git"; exit 1; }
+[ -d "${SDK}/u-boot" ] || { echo "错误: ${SDK}/u-boot 不存在"; exit 1; }
+[ -d "${SDK}/rkbin" ] || { echo "错误: ${SDK}/rkbin 不存在"; exit 1; }
+
+# 复制目录（排除 .git）。优先 rsync，没有就用 tar
+copy_tree() {
+	local src=$1 dst=$2
+	rm -rf "$dst"
+	mkdir -p "$dst"
+	if command -v rsync > /dev/null; then
+		rsync -a --exclude='.git' "${src}/" "${dst}/"
+	else
+		(cd "$src" && tar --exclude='./.git' -cf - .) | (cd "$dst" && tar -xf -)
+	fi
+}
+
 echo "== U-Boot + rkbin =="
 mkdir -p "${OUT}/rk3562-uboot"
-rsync -a --delete --exclude='.git' "${SDK}/u-boot/" "${OUT}/rk3562-uboot/u-boot/"
-rsync -a --delete --exclude='.git' "${SDK}/rkbin/" "${OUT}/rk3562-uboot/rkbin/"
+echo "  复制 u-boot ..."
+copy_tree "${SDK}/u-boot" "${OUT}/rk3562-uboot/u-boot"
+echo "  复制 rkbin ..."
+copy_tree "${SDK}/rkbin" "${OUT}/rk3562-uboot/rkbin"
 cd "${OUT}/rk3562-uboot"
 (cd u-boot && make distclean > /dev/null 2>&1 || true)
 rm -f u-boot/*.img u-boot/*.bin u-boot/*.elf 2> /dev/null || true
@@ -25,7 +43,8 @@ big=$(find . -type f -size +95M)
 rm -rf .git
 git init -q -b main
 git add -A
-git commit -q -m "HZ-RK3562 SDK u-boot + rkbin"
+git -c user.name="${GIT_AUTHOR_NAME:-$OWNER}" -c user.email="${GIT_AUTHOR_EMAIL:-${OWNER}@users.noreply.github.com}" \
+	commit -q -m "HZ-RK3562 SDK u-boot + rkbin"
 git remote add origin "https://github.com/${OWNER}/rk3562-uboot.git"
 
 echo "== 板级设备树 -> ${REPO_ROOT}/dts =="

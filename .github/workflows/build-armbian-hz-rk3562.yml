@@ -77,6 +77,44 @@ jobs:
             rm -f "${name}.tar.xz"
           done
 
+      - name: Map toolchain to the paths hard-coded in make.sh
+        working-directory: sdk/u-boot
+        run: |
+          set -euo pipefail
+          # 厂家 make.sh 写死了 gcc-linaro-6.3.1 之类的路径和 aarch64-linux-gnu- 前缀，
+          # SDK 实际带的是 gcc-arm-10.3（前缀 aarch64-none-linux-gnu-）。
+          # 这里按 make.sh 里出现的每个路径建目录，并用期望的前缀做软链接指向 10.3 工具。
+          TC64=$(realpath ../prebuilts/gcc/linux-x86/aarch64/gcc-arm-10.3-2021.07-x86_64-aarch64-none-linux-gnu/bin)
+          TC32=$(realpath ../prebuilts/gcc/linux-x86/arm/gcc-arm-10.3-2021.07-x86_64-arm-none-linux-gnueabihf/bin)
+          link_tc() {   # $1=目标目录  $2=期望前缀  $3=源 bin 目录  $4=源前缀
+            mkdir -p "$1"
+            for f in "$3/$4"*; do
+              ln -sf "$f" "$1/$2${f##*/$4}"
+            done
+          }
+          grep -oE '\.\./prebuilts/gcc/linux-x86/[A-Za-z0-9_./-]+' make.sh | sort -u | while read -r p; do
+            dir=${p%/bin*}/bin
+            case "$p" in
+              */aarch64/*) pre=$(basename "$p"); [[ "$pre" == *- ]] || pre=aarch64-linux-gnu-
+                           [ -d "$dir" ] && [ -e "$dir/${pre}gcc" ] && continue
+                           link_tc "$dir" "$pre" "$TC64" aarch64-none-linux-gnu-
+                           echo "mapped $dir/${pre}* -> $TC64" ;;
+              */arm/*)     pre=$(basename "$p"); [[ "$pre" == *- ]] || pre=arm-linux-gnueabihf-
+                           [ -d "$dir" ] && [ -e "$dir/${pre}gcc" ] && continue
+                           link_tc "$dir" "$pre" "$TC32" arm-none-linux-gnueabihf-
+                           echo "mapped $dir/${pre}* -> $TC32" ;;
+            esac
+          done
+          # 兜底：常见的 linaro 6.3.1 路径一定建好
+          for d in ../prebuilts/gcc/linux-x86/aarch64/gcc-linaro-6.3.1-2017.05-x86_64_aarch64-linux-gnu/bin; do
+            [ -e "$d/aarch64-linux-gnu-gcc" ] || link_tc "$d" aarch64-linux-gnu- "$TC64" aarch64-none-linux-gnu-
+          done
+          for d in ../prebuilts/gcc/linux-x86/arm/gcc-linaro-6.3.1-2017.05-x86_64_arm-linux-gnueabihf/bin; do
+            [ -e "$d/arm-linux-gnueabihf-gcc" ] || link_tc "$d" arm-linux-gnueabihf- "$TC32" arm-none-linux-gnueabihf-
+          done
+          ls -la ../prebuilts/gcc/linux-x86/*/
+          ../prebuilts/gcc/linux-x86/aarch64/gcc-linaro-6.3.1-2017.05-x86_64_aarch64-linux-gnu/bin/aarch64-linux-gnu-gcc --version | head -n1
+
       - name: Build U-Boot (make.sh)
         working-directory: sdk/u-boot
         env:

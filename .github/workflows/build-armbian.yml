@@ -1,0 +1,170 @@
+name: Build Armbian (RK3562 · Debian 13 Trixie · Minimal)
+
+# =============================================================================
+# 适用于 Rockchip RK3562 开发板（HZHY-RK3562_EVB 及同 SoC 板子）的
+# Armbian Debian 13 (Trixie) Minimal 固件云端编译工作流。
+#
+# 使用方法：
+#   1. 将本仓库 push 到你自己的 GitHub 账号下；
+#   2. 仓库 Settings -> Actions -> General ->
+#      Workflow permissions 设为 "Read and write permissions"（发 Release 需要）；
+#   3. Actions 页面选择 "Build Armbian ..." -> Run workflow，按需修改参数；
+#   4. 构建完成后在运行记录的 Artifacts 中下载 .img.xz（及 .sha）；
+#      若勾选 create_release，固件会同时发布到仓库 Releases。
+# =============================================================================
+
+on:
+  workflow_dispatch:
+    inputs:
+      board:
+        description: "目标板子（hzhy-rk3562-evb = 本仓库自带板级配置；kickpi-k3b = 官方同 SoC 参考板）"
+        required: true
+        type: choice
+        default: "hzhy-rk3562-evb"
+        options:
+          - hzhy-rk3562-evb
+          - kickpi-k3b
+      branch:
+        description: "内核分支：edge = 最新主线内核（推荐）；vendor = Rockchip BSP 6.1/6.12"
+        required: true
+        type: choice
+        default: "edge"
+        options:
+          - edge
+          - vendor
+      release:
+        description: "发行版（trixie = Debian 13）"
+        required: true
+        type: choice
+        default: "trixie"
+        options:
+          - trixie
+          - bookworm
+          - noble
+      build_minimal:
+        description: "构建 Minimal 精简镜像（无桌面、最小软件包集）"
+        required: true
+        type: boolean
+        default: true
+      armbian_repo:
+        description: "Armbian build 框架仓库（fork 后可填自己的仓库进行深度定制）"
+        required: true
+        type: string
+        default: "armbian/build"
+      armbian_branch:
+        description: "Armbian build 框架分支/标签"
+        required: true
+        type: string
+        default: "main"
+      create_release:
+        description: "构建完成后发布到本仓库 Releases"
+        required: true
+        type: boolean
+        default: false
+
+  # 如需每周自动跟进最新主线内核，取消下面两行注释：
+  # schedule:
+  #   - cron: "0 2 * * 1"
+
+permissions:
+  contents: write # 上传 Release 资产所需
+
+concurrency:
+  group: armbian-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: "Armbian ${{ inputs.board }} / ${{ inputs.release }} / kernel-${{ inputs.branch }}"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330 # GitHub 单 job 上限 6 小时，预留余量
+
+    steps:
+      - name: 检出本仓库（板级配置）
+        uses: actions/checkout@v4
+
+      # GitHub 免费 runner 根盘仅 ~14GB 可用，先清理预装软件；
+      # 实际构建放在第二块数据盘 /mnt（约 70GB+）。
+      - name: 释放磁盘空间
+        uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+
+      - name: 克隆 Armbian build 框架
+        run: |
+          git clone --depth=1 \
+            --branch "${{ inputs.armbian_branch }}" \
+            "https://github.com/${{ inputs.armbian_repo }}.git" \
+            /mnt/armbian-build
+
+      - name: 注入自定义板级配置（hzhy-rk3562-evb）
+        run: |
+          install -m 0644 board/hzhy-rk3562-evb.csc \
+            /mnt/armbian-build/config/boards/hzhy-rk3562-evb.csc
+          echo "已注入板级配置："
+          ls -l /mnt/armbian-build/config/boards/hzhy-rk3562-evb.csc
+
+      - name: 缓存 ccache（二次构建提速）
+        uses: actions/cache@v4
+        with:
+          path: /mnt/armbian-build/cache/ccache
+          key: ccache-${{ inputs.board }}-${{ inputs.branch }}-${{ github.run_id }}
+          restore-keys: |
+            ccache-${{ inputs.board }}-${{ inputs.branch }}-
+
+      - name: 编译 Armbian 镜像
+        env:
+          # boolean 输入转 Armbian 需要的 yes/no
+          BUILD_MINIMAL_FLAG: ${{ inputs.build_minimal && 'yes' || 'no' }}
+        run: |
+          cd /mnt/armbian-build
+          ./compile.sh \
+            BOARD="${{ inputs.board }}" \
+            BRANCH="${{ inputs.branch }}" \
+            RELEASE="${{ inputs.release }}" \
+            BUILD_MINIMAL="${BUILD_MINIMAL_FLAG}" \
+            BUILD_DESKTOP=no \
+            KERNEL_CONFIGURE=no \
+            KERNEL_BTF=no \
+            EXPERT=yes \
+            COMPRESS_OUTPUTIMAGE=sha,img,xz \
+            PROGRESS_DISPLAY=plain \
+            PROGRESS_LOG_TO_FILE=yes
+
+      - name: 列出构建产物
+        run: |
+          df -h / /mnt
+          ls -lh /mnt/armbian-build/output/images/ || true
+
+      - name: 上传固件到 Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: armbian-${{ inputs.board }}-${{ inputs.release }}-${{ inputs.branch }}-minimal
+          path: |
+            /mnt/armbian-build/output/images/*.img.xz
+            /mnt/armbian-build/output/images/*.sha
+            /mnt/armbian-build/output/images/*.txt
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: 发布到 Releases（可选）
+        if: inputs.create_release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: armbian-${{ inputs.board }}-${{ github.run_number }}
+          name: "Armbian ${{ inputs.release }} minimal (${{ inputs.board }}, kernel ${{ inputs.branch }})"
+          body: |
+            由 GitHub Actions 自动构建。
+            - 板子：`${{ inputs.board }}`
+            - 发行版：`${{ inputs.release }}`（Debian 13 = trixie）
+            - 内核分支：`${{ inputs.branch }}`
+            - 构建记录：${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          files: |
+            /mnt/armbian-build/output/images/*.img.xz
+            /mnt/armbian-build/output/images/*.sha
