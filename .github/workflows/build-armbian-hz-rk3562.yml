@@ -318,25 +318,30 @@ jobs:
           cat armbian/userpatches/config-hz.conf
           find armbian/userpatches -type f | sort
 
-      - name: Pre-fetch kernel source (depth=1, avoids slow incremental git fetch)
+      - name: Pre-fetch kernel source (full single-branch mirror)
         env:
           KB: ${{ needs.dts-patch.outputs.kbranch }}
         run: |
           set -euo pipefail
           # Armbian 默认在主线 6.1 浅仓库上增量拉取 linux-rockchip，GitHub 计算差量包很慢，
-          # 会触发 "curl 28 Operation too slow" 失败。这里先浅克隆到本地，Armbian 改从本地拉取。
+          # 会触发 "curl 28 Operation too slow" 失败。这里先把该分支完整克隆到本地，Armbian 改从本地拉取。
+          # 注意：本地镜像不能是浅克隆（--depth），否则 Armbian 从它拉取时会报
+          #   "shallow roots are not allowed to be updated" / "Failed to traverse parents"。
           dst=armbian/userpatches/hz-kernel.git
           for i in 1 2 3 4 5; do
             rm -rf "$dst"
-            if git clone --bare --depth=1 --single-branch --branch "${KB}" \
+            if git -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=600 \
+                 clone --bare --single-branch --no-tags --branch "${KB}" \
                  https://github.com/armbian/linux-rockchip.git "$dst"; then
               break
             fi
             echo "clone attempt $i failed, retrying in 30s"; sleep 30
             [ "$i" = 5 ] && { echo "::error::无法克隆 armbian/linux-rockchip ${KB}"; exit 1; }
           done
+          [ ! -f "$dst/shallow" ] || { echo "::error::本地内核镜像是浅仓库"; exit 1; }
           git -C "$dst" log -1 --format='%H %s'
           du -sh "$dst"
+          df -h .
 
       - name: Build
         working-directory: armbian
