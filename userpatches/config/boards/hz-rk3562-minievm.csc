@@ -39,6 +39,14 @@ function post_family_config__999_hz_rk3562_overrides() {
 function custom_kernel_config__hz_rk3562() {
 	opts_y+=("CPU_RK3562" "CLK_RK3562" "ROCKCHIP_VOP2" "FIQ_DEBUGGER" "FIQ_DEBUGGER_CONSOLE" "FIQ_DEBUGGER_CONSOLE_DEFAULT_ENABLE")
 	kernel_config_modifying_hashes+=("hz-rk3562: CPU_RK3562 CLK_RK3562 ROCKCHIP_VOP2 FIQ_DEBUGGER* =y")
+	# RK3562 的 GPU 是 Mali-G52（Bifrost）。开源驱动 panfrost 在厂家 6.1 内核上给 GPU 上电时
+	# 触发 "failed to get ack on domain 'gpu'" -> Kernel panic。关掉 panfrost，改用 Rockchip 的 bifrost 驱动。
+	opts_n+=("DRM_PANFROST")
+	# 编成模块(bifrost_kbase.ko)：Armbian 配置里 midgard/valhall 已是 =y，模块方式避免链接冲突
+	opts_m+=("MALI_BIFROST")
+	opts_y+=("MALI_BIFROST_DEVFREQ")
+	opts_val["MALI_PLATFORM_NAME"]='"rk"'
+	kernel_config_modifying_hashes+=("hz-rk3562: DRM_PANFROST=n MALI_BIFROST=m PLATFORM=rk")
 }
 
 # 镜像卸载前：写入厂家 idblock/uboot，安装 boot.scr，检查 dtb 与内核配置，兜底 armbianEnv/uInitrd
@@ -101,4 +109,40 @@ function pre_umount_final_image__hz_rk3562_vendor_boot() {
 
 	display_alert "HZ-RK3562" "armbianEnv.txt:" "info"
 	cat "${env}"
+
+	# 双保险：即使内核里还有 panfrost 模块，也不让它加载
+	mkdir -p "${MOUNT}/etc/modprobe.d"
+	cat > "${MOUNT}/etc/modprobe.d/hz-rk3562-gpu.conf" <<- 'EOF'
+		# panfrost 给 GPU 上电会触发 Kernel panic，禁用
+		blacklist panfrost
+		# Rockchip Mali Bifrost 驱动尚未在本板验证，先不自动加载。
+		# 手动测试: sudo modprobe bifrost_kbase ；正常的话删掉下面这一行即可开机自动加载
+		blacklist bifrost_kbase
+	EOF
+
+
+	# 厂家 U-Boot 2017.09 执行 boot.scr 失败（内容变乱码）。distro boot 会先找 extlinux.conf，
+	# 找到就不再执行 boot.scr。这里生成 extlinux.conf，全部用实际文件路径（不走符号链接）。
+	local kver rootuuid2
+	kver=$(ls -1 "${bootdir}"/vmlinuz-* | sed 's#.*/vmlinuz-##' | sort -V | tail -n1)
+	rootuuid2=$(grep '^rootdev=' "${env}" | head -n1 | cut -d= -f2-)
+	[[ -n "${kver}" ]] || exit_with_error "HZ-RK3562: 找不到 /boot/vmlinuz-*"
+	[[ -f "${bootdir}/dtb-${kver}/${BOOT_FDT_FILE}" ]] || exit_with_error "HZ-RK3562: 缺少 /boot/dtb-${kver}/${BOOT_FDT_FILE}"
+	local initrd_line=""
+	# extlinux 按原始数据加载 initrd，必须用不带 U-Boot 头的 initrd.img（uInitrd 只给 boot.scr/bootm 用）
+	[[ -f "${bootdir}/initrd.img-${kver}" ]] && initrd_line="    initrd /boot/initrd.img-${kver}"
+	mkdir -p "${bootdir}/extlinux"
+	cat > "${bootdir}/extlinux/extlinux.conf" <<- EOF
+		default armbian
+		timeout 10
+		menu title HZ-RK3562 MiniEVM
+
+		label armbian
+		    kernel /boot/vmlinuz-${kver}
+		    fdt /boot/dtb-${kver}/${BOOT_FDT_FILE}
+		${initrd_line}
+		    append root=${rootuuid2} rootwait rootfstype=ext4 console=ttyFIQ0,115200 earlycon consoleblank=0 loglevel=7 cgroup_enable=memory swapaccount=1 modprobe.blacklist=panfrost
+	EOF
+	display_alert "HZ-RK3562" "extlinux.conf:" "info"
+	cat "${bootdir}/extlinux/extlinux.conf"
 }

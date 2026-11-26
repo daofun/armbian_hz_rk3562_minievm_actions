@@ -18,6 +18,15 @@
 	version = "v1.1.0_20250321";
 };
 
+/*
+ * rk3562-linux.dtsi 的 chosen/bootargs 写死了 root=PARTUUID=614e0000-0000（厂家 Buildroot 分区表）。
+ * 厂家 U-Boot 合并 bootargs 时以内核 dtb 里的 root= 为准，会覆盖 extlinux/命令行传入的 root=，
+ * 导致 Armbian 根分区找不到。这里去掉 root=，由引导程序传入。
+ */
+&chosen {
+	bootargs = "earlycon=uart8250,mmio32,0xff210000 console=ttyFIQ0 rw rootwait modprobe.blacklist=panfrost";
+};
+
 &rknpu {
     status = "okay";
 };
