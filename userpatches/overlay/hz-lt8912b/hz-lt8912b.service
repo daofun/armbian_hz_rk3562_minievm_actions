@@ -1,0 +1,12 @@
+[Unit]
+Description=HZ-RK3562 LT8912B MIPI-DSI to HDMI init (1080p60)
+After=systemd-modules-load.service systemd-udev-settle.service
+Wants=systemd-modules-load.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/hz-lt8912b.sh init
+
+[Install]
+WantedBy=multi-user.target

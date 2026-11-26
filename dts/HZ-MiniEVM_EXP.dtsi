@@ -44,13 +44,17 @@
     pinctrl-0 = <&uart5m1_xfer>;
 };
 
-/* RTC J17 Pin3-I2C3_SDA_M2 Pin5-I2C3_SCL_M2 */
+/*
+ * RTC：当前底板（HZHY-RK3562-SP_MV11 / 原理图 20250529）没有焊 PCF8563/HYM8563，
+ * 节点关闭以免开机报 "pcf8563_probe: write error"。
+ * 如外接 PCF8563 模块到 J30（1=3V3 3=SDA 5=SCL 6=GND，i2c2），把 status 改回 "okay"。
+ */
 &i2c2{
     status = "okay";
     pcf8563: pcf8563@51 {
 		compatible = "nxp,pcf8563";
 		reg = <0x51>;
 		#clock-cells = <0>;
-		status = "okay";
+		status = "disabled";
 	};
 };

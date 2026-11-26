@@ -42,10 +42,19 @@ function custom_kernel_config__hz_rk3562() {
 	# RK3562 的 GPU 是 Mali-G52（Bifrost）。开源驱动 panfrost 在厂家 6.1 内核上给 GPU 上电时
 	# 触发 "failed to get ack on domain 'gpu'" -> Kernel panic。关掉 panfrost，改用 Rockchip 的 bifrost 驱动。
 	opts_n+=("DRM_PANFROST")
-	# Rockchip bifrost 驱动在 Armbian 的 rk35xx 配置下编译失败
-	# （kbase_platform_rk_* 隐式声明），暂不编译。GPU 加速以后单独处理，不影响开机和屏幕显示。
-	opts_n+=("MALI_BIFROST")
-	kernel_config_modifying_hashes+=("hz-rk3562: DRM_PANFROST=n MALI_BIFROST=n")
+	# Rockchip Mali Bifrost 驱动（bifrost_kbase.ko）。
+	# 上次编译报 kbase_platform_rk_* 隐式声明：这几个函数只在 platform/rk/mali_kbase_config_platform.h 里声明，
+	# 说明编译时没用上 rk 平台目录（MALI_PLATFORM_NAME 不是 rk）。这里直接用 --set-str 写入 rk，
+	# 并打印最终值，方便在日志里核对。
+	opts_m+=("MALI_BIFROST")
+	opts_y+=("MALI_BIFROST_DEVFREQ")
+	kernel_config_modifying_hashes+=("hz-rk3562: DRM_PANFROST=n MALI_BIFROST=m MALI_PLATFORM_NAME=rk")
+	if [[ -f .config ]]; then
+		# 先把 MALI_BIFROST 设为 m，MALI_PLATFORM_NAME 才在可配置范围内，再写字符串
+		./scripts/config --module MALI_BIFROST --enable MALI_BIFROST_DEVFREQ
+		./scripts/config --set-str MALI_PLATFORM_NAME rk
+		display_alert "${BOARD}" "GPU: $(grep -E '^CONFIG_MALI_PLATFORM_NAME=' .config || echo 'MALI_PLATFORM_NAME 未设置')" "info"
+	fi
 }
 
 # 镜像卸载前：写入厂家 idblock/uboot，安装 boot.scr，检查 dtb 与内核配置，兜底 armbianEnv/uInitrd
@@ -114,6 +123,9 @@ function pre_umount_final_image__hz_rk3562_vendor_boot() {
 	cat > "${MOUNT}/etc/modprobe.d/hz-rk3562-gpu.conf" <<- 'EOF'
 		# panfrost 给 GPU 上电会触发 Kernel panic，禁用
 		blacklist panfrost
+		# Rockchip Mali 驱动尚未在本板验证（可能和 panfrost 一样卡在 GPU 上电），先不自动加载。
+		# 手动测试: sudo modprobe bifrost_kbase ；正常的话删掉下面这一行即可开机自动加载
+		blacklist bifrost_kbase
 	EOF
 
 
