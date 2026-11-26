@@ -312,10 +312,31 @@ jobs:
           COMPRESS_OUTPUTIMAGE="sha,xz"
           EXPERT="yes"
           SHARE_LOG="no"
+          KERNEL_BTF="no"
           HZ_FDT="rockchip/${DTB_NAME}.dtb"
           EOF
           cat armbian/userpatches/config-hz.conf
           find armbian/userpatches -type f | sort
+
+      - name: Pre-fetch kernel source (depth=1, avoids slow incremental git fetch)
+        env:
+          KB: ${{ needs.dts-patch.outputs.kbranch }}
+        run: |
+          set -euo pipefail
+          # Armbian 默认在主线 6.1 浅仓库上增量拉取 linux-rockchip，GitHub 计算差量包很慢，
+          # 会触发 "curl 28 Operation too slow" 失败。这里先浅克隆到本地，Armbian 改从本地拉取。
+          dst=armbian/userpatches/hz-kernel.git
+          for i in 1 2 3 4 5; do
+            rm -rf "$dst"
+            if git clone --bare --depth=1 --single-branch --branch "${KB}" \
+                 https://github.com/armbian/linux-rockchip.git "$dst"; then
+              break
+            fi
+            echo "clone attempt $i failed, retrying in 30s"; sleep 30
+            [ "$i" = 5 ] && { echo "::error::无法克隆 armbian/linux-rockchip ${KB}"; exit 1; }
+          done
+          git -C "$dst" log -1 --format='%H %s'
+          du -sh "$dst"
 
       - name: Build
         working-directory: armbian

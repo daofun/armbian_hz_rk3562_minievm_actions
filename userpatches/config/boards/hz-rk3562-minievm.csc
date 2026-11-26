@@ -21,6 +21,16 @@ function post_family_config__999_hz_rk3562_overrides() {
 	# 厂家设备树把 fiq-debugger 设为 115200（hzhy_rk3562_mini.dtsi）
 	declare -g SERIALCON="ttyFIQ0:115200"
 	declare -g BOOTSCRIPT="boot-hz-rk3562.cmd:boot.cmd"
+
+	# 工作流已把内核源码浅克隆到 userpatches/hz-kernel.git，改从本地拉取（避免 GitHub 增量拉取超时）
+	local hz_local_kernel="${SRC}/userpatches/hz-kernel.git"
+	if [[ -d "${hz_local_kernel}" ]]; then
+		# 容器内是 root，仓库属主是 runner，放行 safe.directory
+		git config --global --add safe.directory '*' || true
+		declare -g KERNELSOURCE="file://${hz_local_kernel}"
+		declare -g -i KERNEL_GIT_CACHE_TTL=0
+		display_alert "${BOARD}" "kernel source from local mirror ${KERNELSOURCE} (${KERNELBRANCH})" "info"
+	fi
 }
 
 # Armbian 的 linux-rk35xx-vendor.config 没有打开 CONFIG_CPU_RK3562（已核实），
