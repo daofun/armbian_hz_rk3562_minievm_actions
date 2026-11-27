@@ -48,12 +48,18 @@ function custom_kernel_config__hz_rk3562() {
 	# 并打印最终值，方便在日志里核对。
 	opts_m+=("MALI_BIFROST")
 	opts_y+=("MALI_BIFROST_DEVFREQ")
-	kernel_config_modifying_hashes+=("hz-rk3562: DRM_PANFROST=n MALI_BIFROST=m MALI_PLATFORM_NAME=rk")
+	# rk35xx 的配置里 MALI_VALHALL（RK3588 用）和 MALI_MIDGARD（RK3399 等用）是 =y 编进内核的，
+	# 它们和 bifrost 都是 kbase 驱动，导出同名符号，modpost 报 "exported twice"。
+	# RK3562 的 GPU 是 Mali-G52（Bifrost），这两个用不上，关掉。
+	opts_n+=("MALI_VALHALL" "MALI_MIDGARD")
+	kernel_config_modifying_hashes+=("hz-rk3562: DRM_PANFROST=n MALI_VALHALL=n MALI_MIDGARD=n MALI_BIFROST=m MALI_PLATFORM_NAME=rk")
 	if [[ -f .config ]]; then
+		./scripts/config --disable MALI_VALHALL --disable MALI_MIDGARD
 		# 先把 MALI_BIFROST 设为 m，MALI_PLATFORM_NAME 才在可配置范围内，再写字符串
 		./scripts/config --module MALI_BIFROST --enable MALI_BIFROST_DEVFREQ
 		./scripts/config --set-str MALI_PLATFORM_NAME rk
 		display_alert "${BOARD}" "GPU: $(grep -E '^CONFIG_MALI_PLATFORM_NAME=' .config || echo 'MALI_PLATFORM_NAME 未设置')" "info"
+		display_alert "${BOARD}" "GPU: $(grep -E '^(# )?CONFIG_MALI_(VALHALL|MIDGARD|BIFROST)[ =]' .config | tr '\n' ' ')" "info"
 	fi
 }
 
